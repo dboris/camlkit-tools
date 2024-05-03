@@ -1,0 +1,11 @@
+(executable
+ (name main)
+ (public_name browser)
+ (modules main)
+ (libraries camlkit-base.foundation))
+
+(executable
+ (name generate)
+ (public_name generate)
+ (modules generate)
+ (libraries camlkit-base.foundation))
