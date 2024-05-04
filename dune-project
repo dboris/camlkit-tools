@@ -20,5 +20,7 @@
   dune
   ctypes
   ctypes-foreign
-  camlkit-base)
+  camlkit-base
+  markup
+  lambdasoup)
  (tags (camlkit objc bindings cocoa gnustep)))

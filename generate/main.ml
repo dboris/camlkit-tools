@@ -1,46 +1,5 @@
 open Runtime
-
-let is_upper c =
-  let code = Char.code c in
-  code >= 65 && code <= 90
-;;
-
-let is_reserved = function
-| "and" | "as" | "assert" | "asr" | "begin" | "class" | "constraint" | "do"
-| "done" | "downto" | "else" | "end" | "exception" | "external" | "false"
-| "for" | "fun" | "function" | "functor" | "if" | "in" | "include"
-| "inherit" | "initializer" | "land" | "lazy" | "let" | "lor" | "lsl" | "lsr"
-| "lxor" | "match" | "method" | "mod" | "module" | "mutable" | "new"
-| "nonrec" | "object" | "of" | "open" | "or" | "private" | "rec" | "sig"
-| "struct" | "then" | "to" | "true" | "try" | "type" | "val" | "virtual"
-| "when" | "while" | "with" | "selector" | "id" | "string" -> true
-| _ -> false
-
-let is_private sel =
-  Char.equal (String.get sel 0) '.' || String.contains sel '_'
-;;
-
-let valid_name name =
-  if is_upper (String.get name 0) then "_" ^ name
-  else if is_reserved name then name ^ "_"
-  else name
-;;
-
-let split_selector sel =
-  match String.split_on_char ':' sel with
-  | [] -> assert false
-  | name :: args ->
-    match args with
-    | [] ->
-      valid_name name, []
-    | xs ->
-      valid_name name,
-      "x" :: (xs |> List.filter_map @@ fun a ->
-        if String.equal a String.empty then
-          Option.none
-        else
-          Option.some (valid_name a))
-;;
+open Lib
 
 let arg_labels args =
   args
@@ -49,8 +8,8 @@ let arg_labels args =
 ;;
 
 type msg_type =
-| Stret of string * string
-| Normal of string
+| Stret of string * string * string list
+| Normal of string * string list
 
 type meth =
   { name : string
@@ -64,13 +23,13 @@ let method_type m =
     Unsigned.UInt.to_int (Method.get_number_of_arguments m) in
   let arg_types =
     (* Skip the implicit self and _cmd *)
-    List.init (num_args - 2) (fun j ->
+    List.init (num_args - 2) @@ fun j ->
       let i = j + 2 in
       try
         Method.get_argument_type m (Unsigned.UInt.of_int i)
         |> Objc_t.Encode.enc_to_ctype_string
       with
-      | (Objc_t.Encode.Encode_struct arg) as e ->
+      | Objc_t.Encode.Encode_struct arg ->
         begin match arg with
         | "NSRange.t" | "CGRect.t" | "CGPoint.t" | "CGSize.t" -> arg
         | _ ->
@@ -78,19 +37,22 @@ let method_type m =
             (Sel.get_name (Method.get_name m))
             (Method.get_argument_type m (Unsigned.UInt.of_int i))
             arg;
-          raise e
+          "ptr void"
         end
-      | Failure _ as e ->
+      | Failure _ ->
         Printf.eprintf "Failed: %s\tArgs: %s\n"
           (Sel.get_name (Method.get_name m))
           (Method.get_argument_type m (Unsigned.UInt.of_int i));
-        raise e)
+        "ptr void"
   in
   let ret = Method.get_return_type m in
   try
-    Normal (String.concat " @-> " arg_types ^
-      (if num_args > 2 then " @-> " else "") ^
-      "returning (" ^ Objc_t.Encode.enc_to_ctype_string ret ^ ")")
+    Normal
+      ( String.concat " @-> " arg_types ^
+        (if num_args > 2 then " @-> " else "") ^
+        "returning (" ^ Objc_t.Encode.enc_to_ctype_string ret ^ ")"
+      , arg_types
+      )
   with (Objc_t.Encode.Encode_struct ret_ty) as e ->
     begin match ret_ty with
     | "NSRange.t" | "CGRect.t" | "CGPoint.t" | "CGSize.t" ->
@@ -99,6 +61,7 @@ let method_type m =
         (if num_args > 2 then " @-> " else "") ^
         "returning (" ^ ret_ty ^ ")"
       , ret_ty
+      , arg_types
       )
     | _ ->
       Printf.eprintf "Failed: %s\treturns Struct: %s\n"
@@ -108,16 +71,21 @@ let method_type m =
     end
 ;;
 
+let converted_arg name = function
+| "llong" -> "(LLong.of_int " ^ name ^ ")"
+| "ullong" -> "(ULLong.of_int " ^ name ^ ")"
+| _ -> name
+
 let string_of_method_binding {name; args; sel; typ} =
   match args with
   | [] ->
     (* no args *)
     begin match typ with
-    | Normal typ ->
+    | Normal (typ, _) ->
       Printf.sprintf
         "let %s self = msg_send ~self ~cmd:(selector \"%s\") ~typ:(%s)"
         name sel typ
-    | Stret (typ, ret_ty) ->
+    | Stret (typ, ret_ty, _) ->
       Printf.sprintf
         "let %s self = msg_send_stret ~self ~cmd:(selector \"%s\") ~typ:(%s) ~return_type:%s"
         name sel typ ret_ty
@@ -125,26 +93,33 @@ let string_of_method_binding {name; args; sel; typ} =
   | _ :: [] ->
     (* single arg *)
     begin match typ with
-    | Normal typ ->
+    | Normal (typ, arg_types) ->
       Printf.sprintf
-        "let %s x self = msg_send ~self ~cmd:(selector \"%s\") ~typ:(%s) x"
-        name sel typ
-    | Stret (typ, ret_ty) ->
+        "let %s x self = msg_send ~self ~cmd:(selector \"%s\") ~typ:(%s) %s"
+        name sel typ (converted_arg "x" (List.hd arg_types))
+    | Stret (typ, ret_ty, arg_types) ->
       Printf.sprintf
-        "let %s x self = msg_send_stret ~self ~cmd:(selector \"%s\") ~typ:(%s) ~return_type:%s x"
-        name sel typ ret_ty
+        "let %s x self = msg_send_stret ~self ~cmd:(selector \"%s\") ~typ:(%s) ~return_type:%s %s"
+        name sel typ ret_ty (converted_arg "x" (List.hd arg_types))
     end
   | _ :: rest as args ->
     (* multiple args *)
     begin match typ with
-    | Normal typ ->
+    | Normal (typ, arg_types) ->
+      let conv_args =
+        try List.map2 converted_arg args arg_types
+        with Invalid_argument _ ->
+          Printf.eprintf "List.map2 Error: %s %s\n" name typ;
+          args
+      in
       Printf.sprintf
         "let %s x %s self = msg_send ~self ~cmd:(selector \"%s\") ~typ:(%s) %s"
-        name (arg_labels rest) sel typ (String.concat " " args)
-    | Stret (typ, ret_ty) ->
+        name (arg_labels rest) sel typ (String.concat " " conv_args)
+    | Stret (typ, ret_ty, arg_types) ->
+      let conv_args = List.map2 converted_arg args arg_types in
       Printf.sprintf
         "let %s x %s self = msg_send_stret ~self ~cmd:(selector \"%s\") ~typ:(%s) ~return_type:%s %s"
-        name (arg_labels rest) sel typ ret_ty (String.concat " " args)
+        name (arg_labels rest) sel typ ret_ty (String.concat " " conv_args)
     end
 ;;
 
@@ -246,7 +221,7 @@ cls
       | [] -> ()
       | class_bindings ->
         begin
-          Printf.fprintf file "module Class = struct\n";
+          Printf.fprintf file "module C = struct\n";
           emit_method_bindings ~file ~pref:"  " class_bindings;
           Printf.fprintf file "\nend\n\n"
         end

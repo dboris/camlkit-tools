@@ -17,6 +17,8 @@ depends: [
   "ctypes"
   "ctypes-foreign"
   "camlkit-base"
+  "markup"
+  "lambdasoup"
   "odoc" {with-doc}
 ]
 build: [

@@ -9,6 +9,9 @@ WEBKIT := $(FW)/WebKit.framework/Versions/A/WebKit
 build:
 	@dune build @default
 
+gen-bs:
+	@dune exec bs-to-ml < data/AppKit.bridgesupport > data/appkit_.ml
+
 foundation/gen/NSObject.ml:
 	cd foundation/gen && dune exec generate-ml -- -methods NSObject
 
